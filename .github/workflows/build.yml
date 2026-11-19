@@ -1,18 +1,37 @@
-name: Build RK3188 Linux Firmware
+name: 编译 RK3188 Linux 刷机包
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout repository
+      - name: 检出代码仓库
         uses: actions/checkout@v4
 
-      - name: Install Host Dependencies
+      - name: 检查仓库文件是否存在
+        run: |
+          echo "当前工作目录: $(pwd)"
+          echo "--- 仓库根目录内容 ---"
+          ls -la
+          echo "--- configs 目录内容 ---"
+          if [ -d "configs" ]; then ls -la configs/; else echo "错误: configs 目录不存在！"; fi
+          if [ ! -f "configs/3188_defconfig" ]; then
+            echo "错误: 找不到 configs/3188_defconfig 文件，请检查是否已提交到当前分支。"
+            exit 1
+          fi
+          echo "--- dts 目录内容 ---"
+          if [ -d "dts" ]; then ls -la dts/; else echo "错误: dts 目录不存在！"; fi
+          if [ ! -f "dts/rk3188-adesk.dts" ]; then
+            echo "错误: 找不到 dts/rk3188-adesk.dts 文件，请检查是否已提交到当前分支。"
+            exit 1
+          fi
+          echo "文件检查通过。"
+
+      - name: 安装宿主机编译依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev libncurses-dev \
@@ -22,107 +41,138 @@ jobs:
             device-tree-compiler \
             libncurses5
 
-      - name: Download Linux Kernel 6.12
+      - name: 下载并解压 Linux 6.12 内核源码
         run: |
           wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.117.tar.xz
           tar -xvf linux-6.12.117.tar.xz
-          # 将你的 3188_defconfig 放入内核配置目录
-          cp configs/3188_defconfig linux-6.12.117/arch/arm/configs/
+          echo "内核源码解压完成。"
+          # 将 3188_defconfig 放入内核配置目录
+          cp "${GITHUB_WORKSPACE}/configs/3188_defconfig" linux-6.12.117/arch/arm/configs/
+          echo "已复制 3188_defconfig 到内核配置目录。"
 
-      - name: Apply Patches & Add Custom DTS
+      - name: 集成自定义 DTS 并修改 Makefile
         run: |
           cd linux-6.12.117
           
-          # 1. 将你自定义的 DTS 文件复制到内核源码树
-          cp ../dts/rk3188-adesk.dts arch/arm/boot/dts/rockchip/
+          # 1. 将自定义 DTS 文件复制到内核源码树
+          cp "${GITHUB_WORKSPACE}/dts/rk3188-adesk.dts" arch/arm/boot/dts/rockchip/
+          echo "已复制 rk3188-adesk.dts 到内核源码树。"
           
-          # 2. 修改 Rockchip 的 Makefile，让内核认识并编译你的 dtb
-          # 检查是否已经包含该 dtb，如果没有则添加
+          # 2. 修改 Rockchip 的 Makefile，让内核认识并编译该 dtb
           if ! grep -q "rk3188-adesk.dtb" arch/arm/boot/dts/rockchip/Makefile; then
               echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += rk3188-adesk.dtb" >> arch/arm/boot/dts/rockchip/Makefile
+              echo "已追加 rk3188-adesk.dtb 到 Makefile。"
+          else
+              echo "Makefile 中已存在 rk3188-adesk.dtb 条目，跳过追加。"
           fi
-          
-          echo "Custom DTS integrated into kernel tree."
 
-      - name: Configure Kernel
+      - name: 配置内核
         run: |
           cd linux-6.12.117
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
+          # 按需启用关键驱动（可根据实际情况调整）
           scripts/config --enable USB_RK3188_PHY || true
           scripts/config --enable MMC_DW_ROCKCHIP || true
+          echo "内核配置完成。"
 
-      - name: Compile Kernel and Modules
+      - name: 编译内核、设备树与模块
         run: |
           cd linux-6.12.117
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make -j$(nproc) zImage modules dtbs
+          echo "内核、设备树与模块编译完成。"
 
-      - name: Build Rockchip mkbootimg
+      - name: 编译 rockchip-mkbootimg 工具
         run: |
           git clone https://github.com/neo-technologies/rockchip-mkbootimg.git
           cd rockchip-mkbootimg
           make
           ls -la mkbootimg
+          echo "mkbootimg 工具编译完成。"
 
-      - name: Create boot.img
+      - name: 合并内核与 DTB 并生成 boot.img
         run: |
           mkdir -p output
-          # 合并 zImage 和你自己编写的 DTS 编译出的 adesk dtb
+          # 合并 zImage 与自定义 DTS 编译出的 dtb
           cat linux-6.12.117/arch/arm/boot/zImage \
               linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
               > output/kernel-dtb
+          echo "zImage 与 dtb 合并完成。"
           
           # 生成 boot.img
           ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
+          echo "boot.img 生成完成："
           ls -lh output/boot.img
 
-      - name: Prepare Rootfs Base
+      - name: 下载并准备 Ubuntu Base 根文件系统
         run: |
           wget https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-armhf.tar.gz
+          # 创建 2GB 虚拟磁盘（比教程的 1GB 更充裕）
           truncate -s 2G output/rootfs.img
           mkfs.ext4 -F output/rootfs.img
           
+          # 挂载并解压根文件系统
           sudo mkdir -p /mnt/rootfs
           sudo mount -o loop output/rootfs.img /mnt/rootfs
           sudo tar -xpf ubuntu-base-22.04.5-base-armhf.tar.gz -C /mnt/rootfs
+          echo "Ubuntu Base 根文件系统解压完成。"
 
-      - name: Configure Rootfs (Chroot)
+      - name: 进入 chroot 配置根文件系统
         run: |
+          # 准备 chroot 环境
           sudo cp /usr/bin/qemu-arm-static /mnt/rootfs/usr/bin/
           sudo mount --bind /dev /mnt/rootfs/dev
           sudo mount --bind /proc /mnt/rootfs/proc
           sudo mount --bind /sys /mnt/rootfs/sys
           
+          # 写入 DNS 解析，确保 chroot 内 apt 可用
           echo "nameserver 8.8.8.8" | sudo tee /mnt/rootfs/etc/resolv.conf
+          
+          # 进入 chroot 进行系统配置
           sudo chroot /mnt/rootfs /bin/bash -c "
+            echo '正在设置 root 密码...'
             echo 'root:root' | chpasswd
+            
+            echo '正在安装 openssh-server...'
             apt-get update
             apt-get install -y openssh-server
+            
+            echo '正在配置 SSH 允许 root 登录...'
             sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
             sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            
+            echo '正在清理 apt 缓存...'
             apt-get clean
           "
+          echo "根文件系统配置完成。"
 
-      - name: Install Kernel Modules
+      - name: 安装内核模块到根文件系统
         run: |
           cd linux-6.12.117
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           sudo make INSTALL_MOD_PATH=/mnt/rootfs modules_install
+          echo "内核模块安装完成。"
+          echo "检查模块目录："
+          ls /mnt/rootfs/lib/modules/ || true
 
-      - name: Finalize rootfs.img
+      - name: 同步并卸载根文件系统镜像
         run: |
           sync
+          # 解绑伪文件系统
           sudo umount /mnt/rootfs/dev || true
           sudo umount /mnt/rootfs/proc || true
           sudo umount /mnt/rootfs/sys || true
+          # 卸载根文件系统镜像
           sudo umount /mnt/rootfs
+          echo "根文件系统镜像已卸载。"
+          echo "--- 最终产物列表 ---"
           ls -lh output/
 
-      - name: Upload Firmware Artifacts
+      - name: 上传刷机包产物
         uses: actions/upload-artifact@v4
         with:
           name: rk3188-adesk-firmware
