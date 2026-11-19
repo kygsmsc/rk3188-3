@@ -1,8 +1,6 @@
 name: 编译 RK3188 Linux 刷机包
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch: # 允许手动触发
 
 jobs:
