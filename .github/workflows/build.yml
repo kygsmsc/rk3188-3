@@ -1,7 +1,7 @@
 name: 编译 RK3188 Linux 刷机包
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch: # 仅允许手动触发，避免每次提交都编译
 
 jobs:
   build:
@@ -44,7 +44,6 @@ jobs:
           wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.117.tar.xz
           tar -xvf linux-6.12.117.tar.xz
           echo "内核源码解压完成。"
-          # 将 3188_defconfig 放入内核配置目录
           cp "${GITHUB_WORKSPACE}/configs/3188_defconfig" linux-6.12.117/arch/arm/configs/
           echo "已复制 3188_defconfig 到内核配置目录。"
 
@@ -70,6 +69,9 @@ jobs:
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
+          # 启用块设备命令行分区支持（blkdevparts 必需）
+          scripts/config --enable BLK_CMDLINE_PARSER
+          scripts/config --enable CMDLINE_PARTITION
           # 按需启用关键驱动（可根据实际情况调整）
           scripts/config --enable USB_RK3188_PHY || true
           scripts/config --enable MMC_DW_ROCKCHIP || true
@@ -100,8 +102,11 @@ jobs:
               > output/kernel-dtb
           echo "zImage 与 dtb 合并完成。"
           
-          # 生成 boot.img
-          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
+          # 生成 boot.img，并通过 --cmdline 注入 blkdevparts 参数
+          ./rockchip-mkbootimg/mkbootimg \
+            --kernel output/kernel-dtb \
+            --cmdline "earlyprintk console=ttyS2,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rw rootwait init=/sbin/init blkdevparts=mmcblk0:16M@4M(boot),-(rootfs)" \
+            -o output/boot.img
           echo "boot.img 生成完成："
           ls -lh output/boot.img
 
@@ -163,11 +168,9 @@ jobs:
       - name: 同步并卸载根文件系统镜像
         run: |
           sync
-          # 解绑伪文件系统
           sudo umount /mnt/rootfs/dev || true
           sudo umount /mnt/rootfs/proc || true
           sudo umount /mnt/rootfs/sys || true
-          # 卸载根文件系统镜像
           sudo umount /mnt/rootfs
           echo "根文件系统镜像已卸载。"
           echo "--- 最终产物列表 ---"
