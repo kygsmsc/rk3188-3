@@ -110,7 +110,7 @@ jobs:
       - name: 下载并准备 Ubuntu Base 根文件系统
         run: |
           wget https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-armhf.tar.gz
-          # 创建 2GB 虚拟磁盘（比教程的 1GB 更充裕）
+          # 创建 2GB 虚拟磁盘
           truncate -s 2G output/rootfs.img
           mkfs.ext4 -F output/rootfs.img
           
@@ -136,9 +136,12 @@ jobs:
             echo '正在设置 root 密码...'
             echo 'root:root' | chpasswd
             
-            echo '正在安装 openssh-server...'
+            echo '正在更新 apt 源并安装 systemd-sysv 与 openssh-server...'
             apt-get update
-            apt-get install -y openssh-server
+            apt-get install -y systemd-sysv openssh-server
+            
+            echo '正在验证 /sbin/init 是否存在...'
+            ls -l /sbin/init || { echo '错误: /sbin/init 仍然缺失！'; exit 1; }
             
             echo '正在配置 SSH 允许 root 登录...'
             sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
