@@ -12,15 +12,13 @@
 	compatible = "rockchip,rk3188";
 
 	aliases {
-		/* 物理 TTL 接 UART2（0x20064000）；uart2 由 dtsi 默认 alias serial2 映射为 ttyS2 */
 		serial0 = &uart0;
 		serial2 = &uart2;
-		mmc0 = &mmc0;   /* SD 卡控制器 */
-		mmc1 = &emmc;   /* eMMC 控制器 */
+		/* 仅 eMMC：mmc0 -> mmcblk0（根文件系统）。本机无 SD/TF 卡槽，不映射 mmc1。 */
+		mmc0 = &emmc;
 	};
 
 	chosen {
-		/* 修正：console/stdout 对齐物理串口 UART2（ttyS2）；原 serial0/uart0 是误改 */
 		stdout-path = "serial2:115200n8";
 		bootargs = "console=ttyS2,115200 earlyprintk loglevel=8";
 	};
@@ -53,6 +51,25 @@
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		regulator-always-on;
+	};
+
+	/*
+	 * OTG VBUS 供电控制
+	 * 来源：radxarock 使用 gpio2 RK_PD7，但你的板子 GPIO 未知。
+	 * 以下为占位，必须根据原理图修改 gpio 属性，否则可能控制错误引脚。
+	 */
+	vcc_otg: usb-otg-regulator {
+		compatible = "regulator-fixed";
+		enable-active-high;
+		/* TODO: 替换为你的板子实际 GPIO */
+		gpio = <&gpio2 RK_PD7 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&otg_vbus_drv>;
+		regulator-name = "otg-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+		regulator-boot-on;
 	};
 
 	gpio-keys {
@@ -158,7 +175,7 @@
 	};
 };
 
-/* eMMC 控制器 */
+/* eMMC 控制器（唯一存储设备，mmcblk0） */
 &emmc {
 	bus-width = <8>;
 	cap-mmc-highspeed;
@@ -166,23 +183,30 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&emmc_clk>, <&emmc_cmd>, <&emmc_rst>;
 	vmmc-supply = <&vcc_io>;
+	/*
+	 * vqmmc-supply 来源：radxarock 无此配置；参考 bqedison2qc 的写法。
+	 * 你的 eMMC 若为 3.3V IO，指向 vcc_io 是安全兜底。
+	 */
+	vqmmc-supply = <&vcc_io>;
 	status = "okay";
 };
 
-/* SD 卡槽控制器 (已由 &sdmmc 修正为 &mmc0) */
+/*
+ * SD 卡控制器：本机无 SD/TF 卡槽，禁用。
+ * 若内核中该标签为 &sdmmc，请把 &mmc0 改为 &sdmmc。
+ */
 &mmc0 {
-	bus-width = <4>;
-	cap-mmc-highspeed;
-	cap-sd-highspeed;
-	disable-wp;
-	pinctrl-names = "default";
-	pinctrl-0 = <&sd0_clk>, <&sd0_cmd>, <&sd0_cd>, <&sd0_bus4>;
-	vmmc-supply = <&vcc_io>;
-	status = "okay";
+	status = "disabled";
 };
 
 &emac {
 	phy-handle = <&phy0>;
+	phy-mode = "rmii";
+	/*
+	 * phy-supply 来源：radxarock 使用 vcc_rmii。
+	 * 你的板子无此电源，指向 vcc_io 作为 PHY 供电的兜底声明。
+	 */
+	phy-supply = <&vcc_io>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&emac_xfer>, <&emac_mdio>;
 	status = "okay";
@@ -219,6 +243,10 @@
 
 &i2c2 {
 	status = "okay";
+	/*
+	 * MS7210 HDMI：主线内核无驱动，dts 中开启 status 也无法输出画面。
+	 * 保留 disabled 以免产生无意义的 probe 失败日志。
+	 */
 	hdmi_tx: hdmi@2b { compatible = "vendor,ms7210"; reg = <0x2b>; status = "disabled"; };
 	it66121: hdmi-tx@4c { compatible = "ite,it66121"; reg = <0x4c>; status = "disabled"; };
 };
@@ -227,13 +255,6 @@
 &vop0 { status = "disabled"; };
 &vop1 { status = "disabled"; };
 
-/* ========================================================
- * 串口开启（对照实机 TTL 日志修正）
- * 日志证据：earlycon at MMIO 0x20064000（= uart2），8250 probe 0x10124000（= uart0）；
- * TTL 物理接在 uart2，故正式 console 用 &uart2（ttyS2）。
- * 原代码开启的是 &uart0；现改为 &uart2，uart0 保持 dtsi 默认 disabled。
- * ======================================================== */
-/* 原始（误改）：&uart0 { status = "okay"; }; */
 &uart2 {
 	status = "okay";
 };
@@ -242,4 +263,10 @@
 	pmic { pmic_int: pmic-int { rockchip,pins = <0 RK_PB3 RK_FUNC_GPIO &pcfg_pull_up>; }; };
 	hym8563 { rtc_int: rtc-int { rockchip,pins = <0 RK_PB5 RK_FUNC_GPIO &pcfg_pull_up>; }; };
 	ir-receiver { ir_recv_pin: ir-recv-pin { rockchip,pins = <0 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>; }; };
+	usb {
+		/* 来源：radxarock 的 otg_vbus_drv 定义，GPIO 需按你的板子核实 */
+		otg_vbus_drv: otg-vbus-drv {
+			rockchip,pins = <2 RK_PD7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
 };
