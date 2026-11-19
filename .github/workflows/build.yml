@@ -1,0 +1,137 @@
+name: Build RK3188 Linux Firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Host Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libncurses-dev \
+            bc kmod rsync wget xz-utils git \
+            gcc-arm-linux-gnueabihf \
+            qemu-user-static \
+            device-tree-compiler \
+            libncurses5
+
+      - name: Download Linux Kernel 6.12
+        run: |
+          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.117.tar.xz
+          tar -xvf linux-6.12.117.tar.xz
+          # 将你的 3188_defconfig 放入内核配置目录
+          cp configs/3188_defconfig linux-6.12.117/arch/arm/configs/
+
+      - name: Apply Patches (Optional)
+        run: |
+          # 如果你修改了 DTS 或需要打补丁，可以在这里应用
+          # cd linux-6.12.117
+          # patch -p1 < ../patches/adesk-dtb.patch || true
+          echo "Patches applied (if any)"
+
+      - name: Configure Kernel
+        run: |
+          cd linux-6.12.117
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make 3188_defconfig
+          # 启用可能缺失的驱动，确保 adesk 能启动（根据你的需要调整）
+          scripts/config --enable USB_RK3188_PHY || true
+          scripts/config --enable MMC_DW_ROCKCHIP || true
+
+      - name: Compile Kernel and Modules
+        run: |
+          cd linux-6.12.117
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make -j$(nproc) zImage modules dtbs
+
+      - name: Build Rockchip mkbootimg
+        run: |
+          git clone https://github.com/neo-technologies/rockchip-mkbootimg.git
+          cd rockchip-mkbootimg
+          make
+          # 确保可执行文件在当前目录
+          ls -la mkbootimg
+
+      - name: Create boot.img
+        run: |
+          mkdir -p output
+          # 根据教程：合并 zImage 和 adesk dtb
+          cat linux-6.12.117/arch/arm/boot/zImage \
+              linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
+              > output/kernel-dtb
+          # 生成 boot.img
+          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
+          ls -lh output/boot.img
+
+      - name: Prepare Rootfs Base
+        run: |
+          # 下载 Ubuntu Base 22.04 armhf
+          wget https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-armhf.tar.gz
+          # 创建 2GB 镜像（比教程的 1GB 更充裕）
+          truncate -s 2G output/rootfs.img
+          mkfs.ext4 -F output/rootfs.img
+          
+          # 挂载并解压
+          sudo mkdir -p /mnt/rootfs
+          sudo mount -o loop output/rootfs.img /mnt/rootfs
+          sudo tar -xpf ubuntu-base-22.04.5-base-armhf.tar.gz -C /mnt/rootfs
+
+      - name: Configure Rootfs (Chroot)
+        run: |
+          # 准备 chroot 环境
+          sudo cp /usr/bin/qemu-arm-static /mnt/rootfs/usr/bin/
+          sudo mount --bind /dev /mnt/rootfs/dev
+          sudo mount --bind /proc /mnt/rootfs/proc
+          sudo mount --bind /sys /mnt/rootfs/sys
+          
+          # 写入 DNS 和源（确保在 Actions 中能 apt）
+          echo "nameserver 8.8.8.8" | sudo tee /mnt/rootfs/etc/resolv.conf
+          sudo chroot /mnt/rootfs /bin/bash -c "
+            # 设置 root 密码为 root（请自行修改）
+            echo 'root:root' | chpasswd
+            # 安装 SSH 并开启 root 登录
+            apt-get update
+            apt-get install -y openssh-server
+            sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+            sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            # 清理缓存减小体积
+            apt-get clean
+          "
+
+      - name: Install Kernel Modules
+        run: |
+          cd linux-6.12.117
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          sudo make INSTALL_MOD_PATH=/mnt/rootfs modules_install
+
+      - name: Finalize rootfs.img
+        run: |
+          # 同步并卸载
+          sync
+          # 解绑伪文件系统
+          sudo umount /mnt/rootfs/dev || true
+          sudo umount /mnt/rootfs/proc || true
+          sudo umount /mnt/rootfs/sys || true
+          # 卸载镜像
+          sudo umount /mnt/rootfs
+          # 检查文件是否存在
+          ls -lh output/
+
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3188-adesk-firmware
+          path: |
+            output/boot.img
+            output/rootfs.img
+            parameter.txt
