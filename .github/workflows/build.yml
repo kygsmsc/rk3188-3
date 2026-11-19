@@ -10,83 +10,114 @@ jobs:
       - name: 检出代码仓库
         uses: actions/checkout@v4
 
-      - name: 检查仓库文件是否存在
+      - name: 检查仓库文件
         run: |
-          echo "当前工作目录: $(pwd)"
-          ls -la
-          if [ ! -f "configs/3188_defconfig" ]; then
-            echo "错误: 找不到 configs/3188_defconfig 文件。"
-            exit 1
-          fi
-          if [ ! -f "dts/rk3188-adesk.dts" ]; then
-            echo "错误: 找不到 dts/rk3188-adesk.dts 文件。"
-            exit 1
-          fi
-          echo "文件检查通过。"
+          if [ ! -f "configs/3188_defconfig" ]; then echo "缺 config"; exit 1; fi
+          if [ ! -f "dts/rk3188-adesk.dts" ]; then echo "缺 dts"; exit 1; fi
 
-      - name: 安装宿主机编译依赖
+      - name: 安装宿主机依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev libncurses-dev \
-            bc kmod rsync wget xz-utils git \
-            gcc-arm-linux-gnueabihf \
-            qemu-user-static \
-            device-tree-compiler \
-            libncurses5
+            bc kmod rsync wget xz-utils git gcc-arm-linux-gnueabihf qemu-user-static device-tree-compiler libncurses5
 
-      - name: 下载并解压 Linux 6.12 内核源码
+      - name: 下载内核并集成配置与 DTS
         run: |
           wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.117.tar.xz
           tar -xvf linux-6.12.117.tar.xz
-          cp "${GITHUB_WORKSPACE}/configs/3188_defconfig" linux-6.12.117/arch/arm/configs/
-          echo "内核源码解压并配置完毕。"
+          cp configs/3188_defconfig linux-6.12.117/arch/arm/configs/
+          cp dts/rk3188-adesk.dts linux-6.12.117/arch/arm/boot/dts/rockchip/
+          echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += rk3188-adesk.dtb" >> linux-6.12.117/arch/arm/boot/dts/rockchip/Makefile
 
-      - name: 集成自定义 DTS 并修改 Makefile
-        run: |
-          cd linux-6.12.117
-          cp "${GITHUB_WORKSPACE}/dts/rk3188-adesk.dts" arch/arm/boot/dts/rockchip/
-          if ! grep -q "rk3188-adesk.dtb" arch/arm/boot/dts/rockchip/Makefile; then
-              echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += rk3188-adesk.dtb" >> arch/arm/boot/dts/rockchip/Makefile
-          fi
-          echo "自定义 DTS 已集成。"
-
-      - name: 配置内核
+      - name: 编译内核
         run: |
           cd linux-6.12.117
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
-          # 不需要 blkdevparts，保持标准块设备解析
-          scripts/config --disable BLK_CMDLINE_PARSER || true
-          scripts/config --disable CMDLINE_PARTITION || true
-          echo "内核配置完成。"
-
-      - name: 编译内核、设备树与模块
-        run: |
-          cd linux-6.12.117
-          export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabihf-
+          # 确保 initramfs 支持已开启
+          scripts/config --enable BLK_DEV_INITRD
+          scripts/config --enable RD_GZIP
           make -j$(nproc) zImage modules dtbs
-          echo "内核编译完成。"
 
-      - name: 编译 rockchip-mkbootimg 工具
+      - name: 构建 Initramfs 以自动分区
+        run: |
+          # 获取 armhf 架构的静态 busybox 和 fdisk
+          sudo apt-get install -y busybox-static util-linux
+          
+          mkdir -p initramfs/{bin,sbin,etc,proc,sys,dev,tmp}
+          cp /usr/bin/busybox initramfs/bin/
+          # 创建 busybox 的符号链接
+          cd initramfs/bin
+          for cmd in sh mount umount mkdir ls sleep fdisk sfdisk; do ln -s busybox $cmd; done
+          cd ../..
+          
+          # 如果系统自带的 fdisk 是动态链接的，复制所需的库
+          # （这里为了简单，假设 busybox 的 fdisk 够用，或者用静态编译的 fdisk）
+          
+          # 编写 init 脚本
+          cat > initramfs/init << 'EOF'
+          #!/bin/sh
+          
+          echo ">>> Initramfs: 正在检查根分区..."
+          
+          mount -t proc proc /proc
+          mount -t sysfs sys /sys
+          mount -t devtmpfs dev /dev
+          
+          PART="/dev/mmcblk0p1"
+          
+          if [ -b "$PART" ]; then
+              echo ">>> 分区 $PART 已存在，跳过创建。"
+          else
+              echo ">>> 分区 $PART 不存在，正在创建..."
+              # 使用 fdisk 创建从 49152 扇区开始的分区
+              # 注意：busybox fdisk 的命令与 util-linux fdisk 略有不同
+              echo "n
+              p
+              1
+              49152
+
+              w" | fdisk /dev/mmcblk0
+              
+              # 重新加载分区表
+              sync
+              sleep 1
+              echo ">>> 分区创建完成，重启系统..."
+              reboot -f
+          fi
+          
+          # 挂载真正的根文件系统
+          echo ">>> 正在挂载根文件系统..."
+          mount -t ext4 /dev/mmcblk0p1 /newroot
+          
+          if [ $? -ne 0 ]; then
+              echo "!!! 挂载失败，进入 shell..."
+              exec sh
+          fi
+          
+          # 切换到真正的根文件系统
+          exec switch_root /newroot /sbin/init
+          EOF
+          
+          chmod +x initramfs/init
+          
+          # 打包 initramfs
+          cd initramfs
+          find . | cpio -o -H newc | gzip > ../initramfs.cpio.gz
+          cd ..
+          ls -lh initramfs.cpio.gz
+
+      - name: 编译打包工具并生成 boot.img
         run: |
           git clone https://github.com/neo-technologies/rockchip-mkbootimg.git
-          cd rockchip-mkbootimg
-          make
-          echo "mkbootimg 工具编译完成。"
-
-      - name: 合并内核与 DTB 并生成 boot.img
-        run: |
+          cd rockchip-mkbootimg && make && cd ..
           mkdir -p output
-          cat linux-6.12.117/arch/arm/boot/zImage \
-              linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
-              > output/kernel-dtb
-          # 不传入自定义 cmdline，启动参数由 parameter.txt 提供
-          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
-          ls -lh output/boot.img
+          cat linux-6.12.117/arch/arm/boot/zImage linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb > output/kernel-dtb
+          # 打包时加入 initramfs
+          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb --ramdisk initramfs.cpio.gz -o output/boot.img
 
-      - name: 下载并准备 Ubuntu Base 根文件系统
+      - name: 构建 Ubuntu 根文件系统
         run: |
           wget https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-armhf.tar.gz
           truncate -s 2G output/rootfs.img
@@ -94,9 +125,8 @@ jobs:
           sudo mkdir -p /mnt/rootfs
           sudo mount -o loop output/rootfs.img /mnt/rootfs
           sudo tar -xpf ubuntu-base-22.04.5-base-armhf.tar.gz -C /mnt/rootfs
-          echo "根文件系统解压完成。"
 
-      - name: 进入 chroot 配置根文件系统
+      - name: chroot 配置并安装模块
         run: |
           sudo cp /usr/bin/qemu-arm-static /mnt/rootfs/usr/bin/
           sudo mount --bind /dev /mnt/rootfs/dev
@@ -105,34 +135,21 @@ jobs:
           echo "nameserver 8.8.8.8" | sudo tee /mnt/rootfs/etc/resolv.conf
           sudo chroot /mnt/rootfs /bin/bash -c "
             echo 'root:root' | chpasswd
-            apt-get update
-            apt-get install -y systemd-sysv openssh-server
-            ls -l /sbin/init
+            apt-get update && apt-get install -y systemd-sysv openssh-server
             sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-            sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
             apt-get clean
           "
-          echo "根文件系统配置完成。"
-
-      - name: 安装内核模块到根文件系统
-        run: |
           cd linux-6.12.117
-          export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export ARCH=arm && export CROSS_COMPILE=arm-linux-gnueabihf-
           sudo make INSTALL_MOD_PATH=/mnt/rootfs modules_install
-          ls /mnt/rootfs/lib/modules/ || true
 
-      - name: 同步并卸载根文件系统镜像
+      - name: 卸载并上传
         run: |
           sync
-          sudo umount /mnt/rootfs/dev || true
-          sudo umount /mnt/rootfs/proc || true
-          sudo umount /mnt/rootfs/sys || true
-          sudo umount /mnt/rootfs
+          sudo umount /mnt/rootfs/dev /mnt/rootfs/proc /mnt/rootfs/sys /mnt/rootfs || true
           ls -lh output/
 
-      - name: 上传刷机包产物
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: rk3188-adesk-firmware
           path: |
