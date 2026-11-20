@@ -1,6 +1,5 @@
 #!/bin/sh
 
-# 挂载必要的虚拟文件系统
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
@@ -10,7 +9,6 @@ echo ">>> Initramfs: 开始检查 eMMC 分区..."
 PART="/dev/mmcblk0p1"
 ROOTFS_DEV="/dev/mmcblk0p1"
 
-# 检查分区是否存在
 if [ -b "$PART" ]; then
     echo ">>> 分区 $PART 已存在，跳过创建。"
 else
@@ -30,7 +28,6 @@ else
     reboot -f
 fi
 
-# 分区已存在，挂载根文件系统
 echo ">>> 正在挂载根文件系统 $ROOTFS_DEV 到 /newroot..."
 mkdir -p /newroot
 mount -t ext4 "$ROOTFS_DEV" /newroot
@@ -40,6 +37,5 @@ if [ $? -ne 0 ]; then
     exec sh
 fi
 
-# 切换到真正的根文件系统
 echo ">>> 挂载成功，切换到真正的根文件系统..."
 exec switch_root /newroot /sbin/init
