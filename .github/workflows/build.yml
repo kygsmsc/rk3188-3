@@ -15,6 +15,7 @@ jobs:
           if [ ! -f "configs/3188_defconfig" ]; then echo "错误: 缺 configs/3188_defconfig"; exit 1; fi
           if [ ! -f "dts/rk3188-adesk.dts" ]; then echo "错误: 缺 dts/rk3188-adesk.dts"; exit 1; fi
           if [ ! -f "initramfs/init" ]; then echo "错误: 缺 initramfs/init"; exit 1; fi
+          echo "文件检查通过。"
 
       - name: 安装宿主机依赖
         run: |
@@ -40,7 +41,9 @@ jobs:
           # 确保 initramfs 支持开启
           scripts/config --enable BLK_DEV_INITRD
           scripts/config --enable RD_GZIP
+          scripts/config --enable USE_INITRAMFS_SOURCE
           make -j$(nproc) zImage modules dtbs
+          echo "内核编译完成。"
 
       - name: 构建 initramfs
         run: |
@@ -57,7 +60,7 @@ jobs:
           done
           cd ../..
           
-          # 复制我们编写的 init 脚本
+          # 复制 init 脚本
           cp initramfs/init initramfs_build/init
           chmod +x initramfs_build/init
           
@@ -72,10 +75,18 @@ jobs:
           git clone https://github.com/neo-technologies/rockchip-mkbootimg.git
           cd rockchip-mkbootimg && make && cd ..
           mkdir -p output
-          # 合并 zImage 和 dtb
-          cat linux-6.12.117/arch/arm/boot/zImage linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb > output/kernel-dtb
-          # 打包 boot.img，加入 initramfs.cpio.gz 作为 ramdisk
-          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb --ramdisk initramfs.cpio.gz -o output/boot.img
+          
+          # 1. 合并 zImage 和 dtb
+          cat linux-6.12.117/arch/arm/boot/zImage \
+              linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
+              > output/kernel-dtb
+          
+          # 2. 把 initramfs 追加到 kernel-dtb 后面
+          cat output/kernel-dtb initramfs.cpio.gz > output/kernel-dtb-initrd
+          
+          # 3. 打包 boot.img，不使用 --ramdisk（老 Loader 不认）
+          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb-initrd -o output/boot.img
+          
           ls -lh output/boot.img
 
       - name: 构建 Ubuntu 根文件系统
@@ -86,6 +97,7 @@ jobs:
           sudo mkdir -p /mnt/rootfs
           sudo mount -o loop output/rootfs.img /mnt/rootfs
           sudo tar -xpf ubuntu-base-22.04.5-base-armhf.tar.gz -C /mnt/rootfs
+          echo "根文件系统解压完成。"
 
       - name: chroot 配置并安装模块
         run: |
@@ -103,14 +115,16 @@ jobs:
           cd linux-6.12.117
           export ARCH=arm && export CROSS_COMPILE=arm-linux-gnueabihf-
           sudo make INSTALL_MOD_PATH=/mnt/rootfs modules_install
+          echo "根文件系统配置完成。"
 
       - name: 卸载并上传
         run: |
           sync
           sudo umount /mnt/rootfs/dev /mnt/rootfs/proc /mnt/rootfs/sys /mnt/rootfs || true
+          echo "--- 最终产物 ---"
           ls -lh output/
 
-      - name: 上传产物
+      - name: 上传刷机包产物
         uses: actions/upload-artifact@v4
         with:
           name: rk3188-adesk-firmware
