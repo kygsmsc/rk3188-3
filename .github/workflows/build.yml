@@ -32,7 +32,7 @@ jobs:
           cp dts/rk3188-adesk.dts linux-6.12.117/arch/arm/boot/dts/rockchip/
           echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += rk3188-adesk.dtb" >> linux-6.12.117/arch/arm/boot/dts/rockchip/Makefile
 
-      - name: 准备 initramfs 目录
+      - name: 准备 initramfs 目录并打包
         run: |
           mkdir -p initramfs_build/{bin,sbin,etc,proc,sys,dev,tmp,newroot}
           cp /usr/bin/busybox initramfs_build/bin/busybox
@@ -46,39 +46,46 @@ jobs:
           done
           cd ..
           
-          # 放置自动执行脚本和 profile
-          cp initramfs/init.sh initramfs_build/init.sh
-          chmod 755 initramfs_build/init.sh
+          # 放置 init 脚本（注意：内核默认执行 /init）
+          cp initramfs/init.sh initramfs_build/init
+          chmod 755 initramfs_build/init
+          ln -sf busybox initramfs_build/bin/sh
           
-          cat > initramfs_build/etc/profile << 'EOF'
-          /init.sh
-          EOF
+          # 打包为未压缩的 newc cpio（内核支持未压缩格式）
+          cd initramfs_build
+          find . -print0 | cpio --null -o -H newc --owner=0:0 > ../initramfs.cpio
+          cd ..
           
-          echo "initramfs 目录准备完成。"
+          ls -lh initramfs.cpio
+          echo "initramfs 打包完成。"
 
-      - name: 编译内核（内嵌 initramfs）
+      - name: 编译内核（无内嵌 initramfs）
         run: |
           cd linux-6.12.117
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
-          # 嵌入 initramfs 目录
-          scripts/config --set-str INITRAMFS_SOURCE "${GITHUB_WORKSPACE}/initramfs_build"
           scripts/config --enable BLK_DEV_INITRD
-          scripts/config --enable RD_GZIP
           make -j$(nproc) zImage modules dtbs
           echo "内核编译完成。"
-          grep -a ">>> Initramfs: 开始检查" arch/arm/boot/zImage && echo "zImage 中已找到脚本" || echo "警告: zImage 中未找到脚本"
 
       - name: 编译打包工具并生成 boot.img
         run: |
           git clone https://github.com/neo-technologies/rockchip-mkbootimg.git
           cd rockchip-mkbootimg && make && cd ..
           mkdir -p output
+          
+          # 合并内核与 DTB
           cat linux-6.12.117/arch/arm/boot/zImage \
               linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
               > output/kernel-dtb
-          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
+          
+          # 打包 boot.img，把 initramfs 作为 ramdisk 传给 mkbootimg
+          ./rockchip-mkbootimg/mkbootimg \
+            --kernel output/kernel-dtb \
+            --ramdisk initramfs.cpio \
+            -o output/boot.img
+          
           ls -lh output/boot.img
 
       - name: 构建 Ubuntu 根文件系统
