@@ -34,15 +34,25 @@ jobs:
 
       - name: 准备 initramfs 目录
         run: |
-          mkdir -p initramfs_build/{bin,proc,sys,dev,tmp,newroot}
-          cp /usr/bin/busybox initramfs_build/bin/
-          cd initramfs_build/bin
-          for cmd in sh mount umount mkdir ls sleep fdisk sfdisk reboot switch_root; do 
-            ln -sf busybox $cmd
+          mkdir -p initramfs_build/{bin,sbin,proc,sys,dev,tmp,newroot}
+          cp /usr/bin/busybox initramfs_build/bin/busybox
+          chmod +x initramfs_build/bin/busybox
+          
+          # 用 busybox 自带的 install 生成所有命令符号链接
+          cd initramfs_build
+          ./bin/busybox --install -s ./bin
+          # 补充 sbin 下的必要命令
+          for cmd in fdisk sfdisk reboot switch_root; do
+            ln -sf ../bin/busybox sbin/$cmd
           done
-          cd ../..
+          cd ..
+          
+          # 复制 init 脚本并确保可执行权限
           cp initramfs/init initramfs_build/init
-          chmod +x initramfs_build/init
+          chmod 755 initramfs_build/init
+          
+          # 再次确认 /bin/sh 存在
+          ls -l initramfs_build/bin/sh
           echo "initramfs 目录准备完成。"
 
       - name: 编译内核（内嵌 initramfs）
@@ -51,14 +61,15 @@ jobs:
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
-          # 关键：把 initramfs 目录嵌入内核
+          # 把 initramfs 目录嵌入内核
           scripts/config --set-str INITRAMFS_SOURCE "${GITHUB_WORKSPACE}/initramfs_build"
           scripts/config --enable BLK_DEV_INITRD
           scripts/config --enable RD_GZIP
           make -j$(nproc) zImage modules dtbs
           echo "内核编译完成，已内嵌 initramfs。"
-          # 确认 zImage 里确实包含了 initramfs 内容
-          grep -a ">>> Initramfs: 开始检查" linux-6.12.117/arch/arm/boot/zImage && echo "zImage 中已找到 init 脚本内容" || echo "警告: zImage 中未找到 init 脚本"
+          
+          # 检查内核中是否包含 init 脚本内容
+          grep -a ">>> Initramfs: 开始检查" arch/arm/boot/zImage && echo "zImage 中已找到 init 脚本" || echo "警告: zImage 中未找到 init 脚本"
 
       - name: 编译打包工具并生成 boot.img
         run: |
