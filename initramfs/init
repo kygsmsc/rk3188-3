@@ -15,8 +15,6 @@ if [ -b "$PART" ]; then
     echo ">>> 分区 $PART 已存在，跳过创建。"
 else
     echo ">>> 分区 $PART 不存在，正在创建..."
-    # 使用 fdisk 非交互式创建从 49152 扇区开始的分区
-    # 注意：这里假设你的系统里 fdisk 支持这种输入方式
     (
       echo n
       echo p
