@@ -1,7 +1,7 @@
 name: 编译 RK3188 Linux 刷机包
 
 on:
-  workflow_dispatch: # 仅允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -32,61 +32,43 @@ jobs:
           cp dts/rk3188-adesk.dts linux-6.12.117/arch/arm/boot/dts/rockchip/
           echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += rk3188-adesk.dtb" >> linux-6.12.117/arch/arm/boot/dts/rockchip/Makefile
 
-      - name: 编译内核
+      - name: 准备 initramfs 目录
         run: |
-          cd linux-6.12.117
-          export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabihf-
-          make 3188_defconfig
-          # 确保 initramfs 支持开启
-          scripts/config --enable BLK_DEV_INITRD
-          scripts/config --enable RD_GZIP
-          scripts/config --enable USE_INITRAMFS_SOURCE
-          make -j$(nproc) zImage modules dtbs
-          echo "内核编译完成。"
-
-      - name: 构建 initramfs
-        run: |
-          # 创建 initramfs 目录结构
           mkdir -p initramfs_build/{bin,proc,sys,dev,tmp,newroot}
-          
-          # 复制静态 busybox
           cp /usr/bin/busybox initramfs_build/bin/
-          
-          # 在 initramfs 中创建命令符号链接
           cd initramfs_build/bin
           for cmd in sh mount umount mkdir ls sleep fdisk sfdisk reboot switch_root; do 
             ln -sf busybox $cmd
           done
           cd ../..
-          
-          # 复制 init 脚本
           cp initramfs/init initramfs_build/init
           chmod +x initramfs_build/init
-          
-          # 打包成 cpio.gz
-          cd initramfs_build
-          find . | cpio -o -H newc | gzip > ../initramfs.cpio.gz
-          cd ..
-          ls -lh initramfs.cpio.gz
+          echo "initramfs 目录准备完成。"
+
+      - name: 编译内核（内嵌 initramfs）
+        run: |
+          cd linux-6.12.117
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make 3188_defconfig
+          # 关键：把 initramfs 目录嵌入内核
+          scripts/config --set-str INITRAMFS_SOURCE "${GITHUB_WORKSPACE}/initramfs_build"
+          scripts/config --enable BLK_DEV_INITRD
+          scripts/config --enable RD_GZIP
+          make -j$(nproc) zImage modules dtbs
+          echo "内核编译完成，已内嵌 initramfs。"
+          # 确认 zImage 里确实包含了 initramfs 内容
+          grep -a ">>> Initramfs: 开始检查" linux-6.12.117/arch/arm/boot/zImage && echo "zImage 中已找到 init 脚本内容" || echo "警告: zImage 中未找到 init 脚本"
 
       - name: 编译打包工具并生成 boot.img
         run: |
           git clone https://github.com/neo-technologies/rockchip-mkbootimg.git
           cd rockchip-mkbootimg && make && cd ..
           mkdir -p output
-          
-          # 1. 合并 zImage 和 dtb
           cat linux-6.12.117/arch/arm/boot/zImage \
               linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
               > output/kernel-dtb
-          
-          # 2. 把 initramfs 追加到 kernel-dtb 后面
-          cat output/kernel-dtb initramfs.cpio.gz > output/kernel-dtb-initrd
-          
-          # 3. 打包 boot.img，不使用 --ramdisk（老 Loader 不认）
-          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb-initrd -o output/boot.img
-          
+          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
           ls -lh output/boot.img
 
       - name: 构建 Ubuntu 根文件系统
@@ -97,7 +79,6 @@ jobs:
           sudo mkdir -p /mnt/rootfs
           sudo mount -o loop output/rootfs.img /mnt/rootfs
           sudo tar -xpf ubuntu-base-22.04.5-base-armhf.tar.gz -C /mnt/rootfs
-          echo "根文件系统解压完成。"
 
       - name: chroot 配置并安装模块
         run: |
@@ -115,13 +96,11 @@ jobs:
           cd linux-6.12.117
           export ARCH=arm && export CROSS_COMPILE=arm-linux-gnueabihf-
           sudo make INSTALL_MOD_PATH=/mnt/rootfs modules_install
-          echo "根文件系统配置完成。"
 
       - name: 卸载并上传
         run: |
           sync
           sudo umount /mnt/rootfs/dev /mnt/rootfs/proc /mnt/rootfs/sys /mnt/rootfs || true
-          echo "--- 最终产物 ---"
           ls -lh output/
 
       - name: 上传刷机包产物
