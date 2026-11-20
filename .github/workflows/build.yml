@@ -14,7 +14,7 @@ jobs:
         run: |
           if [ ! -f "configs/3188_defconfig" ]; then echo "错误: 缺 configs/3188_defconfig"; exit 1; fi
           if [ ! -f "dts/rk3188-adesk.dts" ]; then echo "错误: 缺 dts/rk3188-adesk.dts"; exit 1; fi
-          if [ ! -f "initramfs/init" ]; then echo "错误: 缺 initramfs/init"; exit 1; fi
+          if [ ! -f "initramfs/init.sh" ]; then echo "错误: 缺 initramfs/init.sh"; exit 1; fi
           echo "文件检查通过。"
 
       - name: 安装宿主机依赖
@@ -34,25 +34,26 @@ jobs:
 
       - name: 准备 initramfs 目录
         run: |
-          mkdir -p initramfs_build/{bin,sbin,proc,sys,dev,tmp,newroot}
+          mkdir -p initramfs_build/{bin,sbin,etc,proc,sys,dev,tmp,newroot}
           cp /usr/bin/busybox initramfs_build/bin/busybox
           chmod +x initramfs_build/bin/busybox
           
-          # 用 busybox 自带的 install 生成所有命令符号链接
+          # 使用 busybox 生成命令符号链接
           cd initramfs_build
           ./bin/busybox --install -s ./bin
-          # 补充 sbin 下的必要命令
           for cmd in fdisk sfdisk reboot switch_root; do
             ln -sf ../bin/busybox sbin/$cmd
           done
           cd ..
           
-          # 复制 init 脚本并确保可执行权限
-          cp initramfs/init initramfs_build/init
-          chmod 755 initramfs_build/init
+          # 放置自动执行脚本和 profile
+          cp initramfs/init.sh initramfs_build/init.sh
+          chmod 755 initramfs_build/init.sh
           
-          # 再次确认 /bin/sh 存在
-          ls -l initramfs_build/bin/sh
+          cat > initramfs_build/etc/profile << 'EOF'
+          /init.sh
+          EOF
+          
           echo "initramfs 目录准备完成。"
 
       - name: 编译内核（内嵌 initramfs）
@@ -61,15 +62,13 @@ jobs:
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
-          # 把 initramfs 目录嵌入内核
+          # 嵌入 initramfs 目录
           scripts/config --set-str INITRAMFS_SOURCE "${GITHUB_WORKSPACE}/initramfs_build"
           scripts/config --enable BLK_DEV_INITRD
           scripts/config --enable RD_GZIP
           make -j$(nproc) zImage modules dtbs
-          echo "内核编译完成，已内嵌 initramfs。"
-          
-          # 检查内核中是否包含 init 脚本内容
-          grep -a ">>> Initramfs: 开始检查" arch/arm/boot/zImage && echo "zImage 中已找到 init 脚本" || echo "警告: zImage 中未找到 init 脚本"
+          echo "内核编译完成。"
+          grep -a ">>> Initramfs: 开始检查" arch/arm/boot/zImage && echo "zImage 中已找到脚本" || echo "警告: zImage 中未找到脚本"
 
       - name: 编译打包工具并生成 boot.img
         run: |
