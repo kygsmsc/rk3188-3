@@ -14,7 +14,6 @@ jobs:
         run: |
           if [ ! -f "configs/3188_defconfig" ]; then echo "错误: 缺 configs/3188_defconfig"; exit 1; fi
           if [ ! -f "dts/rk3188-adesk.dts" ]; then echo "错误: 缺 dts/rk3188-adesk.dts"; exit 1; fi
-          if [ ! -f "initramfs/init" ]; then echo "错误: 缺 initramfs/init"; exit 1; fi
           echo "文件检查通过。"
 
       - name: 安装宿主机依赖
@@ -22,7 +21,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev libncurses-dev \
             bc kmod rsync wget xz-utils git gcc-arm-linux-gnueabihf qemu-user-static \
-            device-tree-compiler libncurses5 busybox-static cpio
+            device-tree-compiler libncurses5
 
       - name: 下载内核并集成配置与 DTS
         run: |
@@ -32,65 +31,26 @@ jobs:
           cp dts/rk3188-adesk.dts linux-6.12.117/arch/arm/boot/dts/rockchip/
           echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += rk3188-adesk.dtb" >> linux-6.12.117/arch/arm/boot/dts/rockchip/Makefile
 
-      - name: 准备极小 initramfs 并严格对齐
-        run: |
-          mkdir -p initramfs_build/{bin,dev,proc,sys,tmp,newroot}
-          
-          cp /usr/bin/busybox initramfs_build/bin/busybox
-          chmod 755 initramfs_build/bin/busybox
-          cd initramfs_build/bin
-          for cmd in sh mount umount mkdir mknod fdisk reboot switch_root ls sleep sync; do
-            ln -sf busybox $cmd
-          done
-          cd ../..
-          
-          cp initramfs/init initramfs_build/init
-          chmod 755 initramfs_build/init
-          
-          # 打包为未压缩 newc cpio
-          cd initramfs_build
-          find . -print0 | cpio --null -o -H newc --owner=0:0 > ../initramfs.cpio
-          cd ..
-          
-          # 严格补齐到 512 字节
-          SIZE=$(stat -c%s initramfs.cpio)
-          PAD=$(( (512 - SIZE % 512) % 512 ))
-          if [ "$PAD" -ne 0 ]; then
-            dd if=/dev/zero bs=1 count=$PAD >> initramfs.cpio 2>/dev/null
-          fi
-          
-          ls -l initramfs.cpio
-          echo "initramfs 打包并补齐完成。"
-
-      - name: 编译内核（无内嵌 initramfs）
+      - name: 编译内核、设备树与模块
         run: |
           cd linux-6.12.117
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
-          scripts/config --enable BLK_DEV_INITRD
           make -j$(nproc) zImage modules dtbs
-          echo "内核编译完成。"
 
-      - name: 编译打包工具并生成 boot.img（不带 pagesize）
+      - name: 编译 rockchip-mkbootimg 并生成 boot.img
         run: |
           git clone https://github.com/neo-technologies/rockchip-mkbootimg.git
           cd rockchip-mkbootimg && make && cd ..
           mkdir -p output
-          
           cat linux-6.12.117/arch/arm/boot/zImage \
               linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
               > output/kernel-dtb
-          
-          # 关键：不加 --pagesize，保留 --ramdisk
-          ./rockchip-mkbootimg/mkbootimg \
-            --kernel output/kernel-dtb \
-            --ramdisk initramfs.cpio \
-            -o output/boot.img
-          
+          ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
           ls -lh output/boot.img
 
-      - name: 构建 Ubuntu 根文件系统
+      - name: 下载 Ubuntu Base 根文件系统
         run: |
           wget https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-armhf.tar.gz
           truncate -s 2G output/rootfs.img
@@ -99,7 +59,7 @@ jobs:
           sudo mount -o loop output/rootfs.img /mnt/rootfs
           sudo tar -xpf ubuntu-base-22.04.5-base-armhf.tar.gz -C /mnt/rootfs
 
-      - name: chroot 配置并安装模块
+      - name: 进入 chroot 配置根文件系统
         run: |
           sudo cp /usr/bin/qemu-arm-static /mnt/rootfs/usr/bin/
           sudo mount --bind /dev /mnt/rootfs/dev
@@ -112,11 +72,15 @@ jobs:
             sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
             apt-get clean
           "
+
+      - name: 安装内核模块到根文件系统
+        run: |
           cd linux-6.12.117
-          export ARCH=arm && export CROSS_COMPILE=arm-linux-gnueabihf-
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
           sudo make INSTALL_MOD_PATH=/mnt/rootfs modules_install
 
-      - name: 卸载并上传
+      - name: 卸载并上传产物
         run: |
           sync
           sudo umount /mnt/rootfs/dev /mnt/rootfs/proc /mnt/rootfs/sys /mnt/rootfs || true
