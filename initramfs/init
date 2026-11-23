@@ -1,0 +1,45 @@
+#!/bin/sh
+
+# 创建控制台节点
+mknod -m 600 /dev/console c 5 1 2>/dev/null || true
+mknod -m 666 /dev/null c 1 3 2>/dev/null || true
+
+# 挂载基础文件系统
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sys /sys 2>/dev/null || true
+mount -t devtmpfs dev /dev 2>/dev/null || true
+
+echo ">>> Initramfs: checking eMMC..."
+
+PART="/dev/mmcblk0p1"
+
+if [ -b "$PART" ]; then
+    echo ">>> Partition $PART exists."
+else
+    echo ">>> Partition $PART missing, creating..."
+    (
+      echo n
+      echo p
+      echo 1
+      echo 49152
+      echo ""
+      echo w
+    ) | fdisk /dev/mmcblk0
+
+    sync
+    sleep 1
+    echo ">>> Partition created, rebooting..."
+    reboot -f
+fi
+
+echo ">>> Mounting rootfs..."
+mkdir -p /newroot
+mount -t ext4 "$PART" /newroot
+
+if [ $? -ne 0 ]; then
+    echo "!!! Mount failed, dropping to shell..."
+    exec sh
+fi
+
+echo ">>> Switching root..."
+exec switch_root /newroot /sbin/init
