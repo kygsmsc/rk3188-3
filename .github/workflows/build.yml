@@ -37,6 +37,8 @@ jobs:
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make 3188_defconfig
+          # 确保 blkdevparts 解析器被编入内核
+          scripts/config --enable BLK_CMDLINE_PARSER
           make -j$(nproc) zImage modules dtbs
 
       - name: 编译 rockchip-mkbootimg 并生成 boot.img
@@ -48,7 +50,6 @@ jobs:
               linux-6.12.117/arch/arm/boot/dts/rockchip/rk3188-adesk.dtb \
               > output/kernel-dtb
           ./rockchip-mkbootimg/mkbootimg --kernel output/kernel-dtb -o output/boot.img
-          ls -lh output/boot.img
 
       - name: 下载 Ubuntu Base 根文件系统
         run: |
